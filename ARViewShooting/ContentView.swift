@@ -6,14 +6,14 @@
 //
 
 import SwiftUI
+import ARKit
 import RealityKit
 
 struct ContentView: View {
-    @ObservedObject var game = Game(viewContainer: ARViewContainer())
+    @ObservedObject var game: Game
     
     var body: some View {
         VStack {
-            game.viewContainer.edgesIgnoringSafeArea(.all)
             ZStack(alignment: .center) {
                 Button(game.started ? "Finish" : "Start") {
                     game.started.toggle()
@@ -39,57 +39,57 @@ struct ContentView: View {
     }
 }
 
-struct ARViewContainer: UIViewRepresentable {
-    let arView = ARView(frame: .zero)
+struct ImmersiveContentView: View {
+    @ObservedObject var game: Game
     
-    func makeUIView(context: Context) -> ARView {
-        return arView
-    }
-    
-    func updateUIView(_ uiView: ARView, context: Context) {}
-    
-    func addRandomTargets() -> ModelEntity {
-        let box = MeshResource.generateBox(size: 0.1)
-        let material = SimpleMaterial(color: .red, isMetallic: true)
-        let entity = ModelEntity(mesh: box, materials: [material])
-        entity.collision = CollisionComponent(shapes: [.generateBox(width: 0.1, height: 0.1, depth: 0.1)])
-        
-        let x = Float.random(in: -0.5...0.5)
-        let y = Float.random(in: -0.5...0.5)
-        let z: Float = -0.2
-        
-        let anchor = AnchorEntity(world: simd_float3(x, y, z))
-        anchor.addChild(entity)
-        
-        arView.scene.addAnchor(anchor)
-        return entity
+    var body: some View {
+        RealityView { content in
+            content.add(game.root)
+        } update: { content in
+            for target in game.targets {
+                game.root.addChild(target)
+            }
+        }.gesture(
+            SpatialTapGesture()
+                .targetedToAnyEntity()
+                .onEnded({ value in
+                    if let entity = value.entity as? ModelEntity {
+                        if !game.shooted.contains(entity) {
+                            game.shooted.append(entity)
+                            let shootedMaterial = SimpleMaterial(color: .blue, isMetallic: true)
+                            entity.model?.materials = [shootedMaterial]
+                            if game.targets.count == game.shooted.count {
+                                game.started = false
+                                game.finish()
+                            }
+                        }
+                    }
+                })
+        )
     }
 }
 
 class Game: ObservableObject {
-    let viewContainer: ARViewContainer
     
     @Published var started = false
     @Published var targets: [ModelEntity] = []
     @Published var shooted: [ModelEntity] = []
+    public let root = Entity()
     
-    private var tapGesture: UITapGestureRecognizer!
+    var worldInfo = WorldTrackingProvider()
     
-    init(viewContainer: ARViewContainer) {
-        self.viewContainer = viewContainer
-        self.tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+    init() {
+        setInitialCameraPosition()
     }
     
     func start() {
         clearTargets()
         for _ in 0..<5 {
-            targets.append(viewContainer.addRandomTargets())
+            targets.append(addRandomTargets())
         }
-        viewContainer.arView.addGestureRecognizer(tapGesture)
     }
     
     func finish() {
-        viewContainer.arView.removeGestureRecognizer(tapGesture)
         clearTargets()
     }
     
@@ -99,22 +99,47 @@ class Game: ObservableObject {
         shooted = []
     }
     
-    @objc func handleTap(recognizer: UITapGestureRecognizer) {
-        let tapLocation = recognizer.location(in: viewContainer.arView)
-        if let entity = viewContainer.arView.entity(at: tapLocation) as? ModelEntity {
-            if !shooted.contains(entity) {
-                shooted.append(entity)
-                let shootedMaterial = SimpleMaterial(color: .blue, isMetallic: true)
-                entity.model?.materials = [shootedMaterial]
-                if targets.count == shooted.count {
-                    started = false
-                    finish()
-                }
-            }
+    func addRandomTargets() -> ModelEntity {
+        let box = MeshResource.generateBox(size: 0.1)
+        let material = SimpleMaterial(color: .red, isMetallic: true)
+        let entity = ModelEntity(mesh: box, materials: [material])
+        entity.collision = CollisionComponent(shapes: [ShapeResource.generateConvex(from: entity.model!.mesh)])
+        entity.components.set(InputTargetComponent())
+        
+        let x: Float = Float.random(in: -0.5 ... 0.5)
+        let y: Float = Float.random(in: -0.5 ... 0.5)
+        let z: Float = Float.random(in: -1.0 ... -0.5)
+        
+        entity.position = simd_float3(x, y, z)
+        
+        return entity
+    }
+    
+    func setInitialCameraPosition() {
+#if targetEnvironment(simulator)
+        root.position.y = 1.05
+        root.position.z = -1
+#else
+        guard let pose = worldInfo.queryDeviceAnchor(atTimestamp: CACurrentMediaTime()) else {
+            root.position.y = 1.05
+            root.position.z = -1
+            return
         }
+        let cameraMatrix = pose.originFromAnchorTransform
+        let cameraTransform = Transform(matrix: cameraMatrix)
+        root.position = cameraTransform.translation + cameraMatrix.forward * -0.5
+#endif
+    }
+}
+
+public extension simd_float4x4 {
+    
+    /// Returns the forward vector for the orientation represented by this matrix.
+    var forward: SIMD3<Float> {
+        simd_normalize(SIMD3<Float>(columns.2.x, columns.2.y, columns.2.z))
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView(game: Game())
 }
